@@ -1,8 +1,19 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
+import { Bar } from 'react-chartjs-2';
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Tooltip,
+  Legend
+} from 'chart.js';
+
+ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend);
 
 // API Configuration
-const API_BASE_URL = 'https://congestion-game-simulator.onrender.com/';
+const API_BASE_URL = 'http://localhost:8000'; //'https://congestion-game-simulator.onrender.com/';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper Functions
@@ -15,6 +26,41 @@ const getCongestionColor = (level) => {
   const r = Math.min(255, Math.floor(level * 2 * 255));
   const g = Math.min(255, Math.floor((1 - level) * 2 * 255));
   return `rgb(${r}, ${g}, 50)`;
+};
+
+const formatNumber = (value, decimals = 2) => {
+  if (value === null || value === undefined || Number.isNaN(value)) return '0';
+  const rounded = Number.parseFloat(value).toFixed(decimals);
+  return String(Number(rounded));
+};
+
+const formatCostFunctionLabel = (costFunction) => {
+  if (!costFunction) return 't=0';
+  if (costFunction.function_type === 'bpr') {
+    return `t=${formatNumber(costFunction.free_flow_time)}(1+${formatNumber(costFunction.alpha)}(f/${formatNumber(costFunction.capacity)})^${formatNumber(costFunction.beta)})`;
+  }
+
+  return `t=${formatNumber(costFunction.a)}f^${formatNumber(costFunction.k)}+${formatNumber(costFunction.b)}`;
+};
+
+const getConnectivityRatio = (nodeCount, edgeCount) => {
+  if (nodeCount < 2) return 0;
+  return edgeCount / (nodeCount * (nodeCount - 1));
+};
+
+const formatNetworkName = (nodeCount, edgeCount) => {
+  const ratio = getConnectivityRatio(nodeCount, edgeCount);
+  return `${nodeCount}N-${edgeCount}E CR ${ratio.toFixed(2)}`;
+};
+
+const downloadJson = (filename, payload) => {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,8 +124,7 @@ const NetworkCanvas = ({
   onNodeClick, 
   onEdgeClick,
   edgeResults,
-  showResults,
-  resultType
+  showResults
 }) => {
   const svgRef = useRef(null);
   const [sourceNode, setSourceNode] = useState(null);
@@ -177,6 +222,12 @@ const NetworkCanvas = ({
     };
   };
 
+  const getEdgeLabelLines = (edge, result) => {
+    const formulaLine = formatCostFunctionLabel(edge.cost_function);
+    if (!result) return [formulaLine];
+    return [formulaLine, `f=${formatNumber(result.flow)} c=${formatNumber(result.cost)}`];
+  };
+
   return (
     <svg
       ref={svgRef}
@@ -201,6 +252,9 @@ const NetworkCanvas = ({
         
         const { linePath, arrowPath, midX, midY } = getArrowPath(source, target);
         const result = getEdgeResult(edge.id);
+        const labelLines = getEdgeLabelLines(edge, result);
+        const labelWidth = Math.max(80, Math.max(...labelLines.map(line => line.length)) * 6);
+        const labelHeight = 18 + (labelLines.length - 1) * 12;
         
         return (
           <g key={edge.id} onClick={(e) => { e.stopPropagation(); onEdgeClick(edge); }}>
@@ -221,21 +275,23 @@ const NetworkCanvas = ({
             {/* Edge label */}
             <g transform={`translate(${midX}, ${midY})`}>
               <rect
-                x="-30"
-                y="-12"
-                width="60"
-                height="24"
+                x={-labelWidth / 2}
+                y={-labelHeight / 2}
+                width={labelWidth}
+                height={labelHeight}
                 fill="rgba(10, 10, 20, 0.9)"
                 rx="4"
               />
               <text
                 textAnchor="middle"
-                dy="4"
+                dy={labelLines.length > 1 ? -2 : 4}
                 fill="#e0e0e0"
                 fontSize="10"
                 fontFamily="Inter, sans-serif"
               >
-                {result ? `f=${result.flow.toFixed(1)}` : `t=${edge.cost_function.a}f${edge.cost_function.k > 0 ? `^${edge.cost_function.k}` : ''}+${edge.cost_function.b}`}
+                {labelLines.map((line, idx) => (
+                  <tspan key={idx} x="0" dy={idx === 0 ? 0 : 12}>{line}</tspan>
+                ))}
               </text>
             </g>
           </g>
@@ -302,6 +358,11 @@ function App() {
   const [edges, setEdges] = useState([]);
   const [odPairs, setOdPairs] = useState([]);
   const [nextNodeId, setNextNodeId] = useState(1);
+
+  const [savedNetworks, setSavedNetworks] = useState([]);
+  const [simulationHistory, setSimulationHistory] = useState([]);
+  const [demandEditorId, setDemandEditorId] = useState(null);
+  const importInputRef = useRef(null);
 
   // UI state
   const [mode, setMode] = useState('addNode'); // 'addNode', 'addEdge', 'select'
@@ -426,6 +487,118 @@ function App() {
   };
 
   // ─────────────────────────────────────────────────────────────────────────
+  // Local Storage Persistence
+  // ─────────────────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    try {
+      const storedNetworks = localStorage.getItem('cg_saved_networks');
+      if (storedNetworks) {
+        setSavedNetworks(JSON.parse(storedNetworks));
+      }
+      const storedHistory = localStorage.getItem('cg_sim_history');
+      if (storedHistory) {
+        setSimulationHistory(JSON.parse(storedHistory));
+      }
+    } catch (storageError) {
+      console.error('Failed to load saved data', storageError);
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('cg_saved_networks', JSON.stringify(savedNetworks));
+  }, [savedNetworks]);
+
+  useEffect(() => {
+    localStorage.setItem('cg_sim_history', JSON.stringify(simulationHistory));
+  }, [simulationHistory]);
+
+  const saveCurrentNetwork = () => {
+    if (nodes.length === 0 || edges.length === 0) {
+      setError('Add at least one node and one edge before saving.');
+      return;
+    }
+    const entry = {
+      id: generateId(),
+      name: formatNetworkName(nodes.length, edges.length),
+      createdAt: new Date().toISOString(),
+      network: {
+        nodes: nodes.map(n => ({ ...n })),
+        edges: edges.map(e => ({ ...e })),
+        od_pairs: odPairs.map(od => ({ ...od }))
+      }
+    };
+    setSavedNetworks(prev => [entry, ...prev]);
+  };
+
+  const loadSavedNetwork = (entry) => {
+    if (!entry?.network) return;
+    setNodes(entry.network.nodes || []);
+    setEdges(entry.network.edges || []);
+    setOdPairs((entry.network.od_pairs || []).map(od => ({
+      id: od.id || generateId(),
+      origin: od.origin,
+      destination: od.destination,
+      demand: od.demand
+    })));
+    const maxNodeId = (entry.network.nodes || [])
+      .map(n => parseInt(n.id, 10))
+      .filter(n => !Number.isNaN(n));
+    setNextNodeId(maxNodeId.length > 0 ? Math.max(...maxNodeId) + 1 : 1);
+    setResults(null);
+    setSelectedEdge(null);
+    setSelectedEdgeData(null);
+  };
+
+  const deleteSavedNetwork = (id) => {
+    setSavedNetworks(prev => prev.filter(entry => entry.id !== id));
+  };
+
+  const exportSavedNetworks = () => {
+    downloadJson('congestion-networks.json', { networks: savedNetworks });
+  };
+
+  const exportHistory = () => {
+    downloadJson('simulation-history.json', { history: simulationHistory });
+  };
+
+  const exportSession = () => {
+    downloadJson('congestion-session.json', { networks: savedNetworks, history: simulationHistory });
+  };
+
+  const handleImport = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (Array.isArray(data.networks)) {
+        setSavedNetworks(prev => [...data.networks, ...prev]);
+      }
+      if (Array.isArray(data.history)) {
+        setSimulationHistory(prev => [...data.history, ...prev]);
+      }
+      if (data.nodes && data.edges && data.od_pairs) {
+        const entry = {
+          id: generateId(),
+          name: formatNetworkName(data.nodes.length, data.edges.length),
+          createdAt: new Date().toISOString(),
+          network: {
+            nodes: data.nodes,
+            edges: data.edges,
+            od_pairs: data.od_pairs
+          }
+        };
+        setSavedNetworks(prev => [entry, ...prev]);
+      }
+    } catch (importError) {
+      setError('Import failed. Please check the JSON file.');
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
   // Computation
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -456,6 +629,15 @@ function App() {
 
       const response = await axios.post(`${API_BASE_URL}/compute`, networkData);
       setResults(response.data);
+
+      const historyEntry = {
+        id: generateId(),
+        name: formatNetworkName(nodes.length, edges.length),
+        createdAt: new Date().toISOString(),
+        network: networkData,
+        results: response.data
+      };
+      setSimulationHistory(prev => [historyEntry, ...prev]);
     } catch (err) {
       setError(err.response?.data?.detail || 'Computation failed. Make sure the backend is running.');
     } finally {
@@ -471,9 +653,31 @@ function App() {
     }
   }, [error]);
 
-  const currentEdgeResults = results 
-    ? (resultType === 'we' ? results.wardrop_equilibrium.edge_results : results.system_optimum.edge_results)
+  const currentResult = results
+    ? (resultType === 'we' ? results.wardrop_equilibrium : results.system_optimum)
     : null;
+
+  const currentEdgeResults = currentResult ? currentResult.edge_results : null;
+
+  const routeLoadCharts = useMemo(() => {
+    if (!currentResult?.path_flows?.length) return [];
+    const groups = {};
+    currentResult.path_flows.forEach((pf) => {
+      if (!pf.path || pf.path.length < 2) return;
+      const odKey = `${pf.path[0]}→${pf.path[pf.path.length - 1]}`;
+      if (!groups[odKey]) groups[odKey] = [];
+      groups[odKey].push({
+        label: pf.path.join('→'),
+        flow: pf.flow
+      });
+    });
+
+    return Object.entries(groups).map(([odKey, flows]) => ({
+      odKey,
+      labels: flows.map(item => item.label),
+      data: flows.map(item => item.flow)
+    }));
+  }, [currentResult]);
 
   return (
     <div className="app-container">
@@ -745,6 +949,98 @@ function App() {
             </div>
           </div>
 
+          {/* Network Library Section */}
+          <div className="section">
+            <div className="section-header">
+              <h3>
+                <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M4 4h16v16H4z"/>
+                  <path d="M8 8h8v8H8z"/>
+                </svg>
+                Network Library
+              </h3>
+              <button className="btn btn-secondary btn-sm" onClick={saveCurrentNetwork}>
+                Save
+              </button>
+            </div>
+            <div className="section-content">
+              {savedNetworks.length === 0 ? (
+                <div className="instruction-text">Saved networks will appear here</div>
+              ) : (
+                <div className="library-list">
+                  {savedNetworks.map(entry => (
+                    <div key={entry.id} className="library-item">
+                      <div>
+                        <div className="library-title">{entry.name}</div>
+                        <div className="library-meta">{new Date(entry.createdAt).toLocaleString()}</div>
+                      </div>
+                      <div className="library-actions">
+                        <button className="btn btn-secondary btn-sm" onClick={() => loadSavedNetwork(entry)}>Load</button>
+                        <button className="btn btn-danger btn-sm" onClick={() => deleteSavedNetwork(entry.id)}>Delete</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="btn-group">
+                <button className="btn btn-secondary btn-sm" onClick={exportSavedNetworks}>Export Networks</button>
+                <button className="btn btn-secondary btn-sm" onClick={() => importInputRef.current?.click()}>Import JSON</button>
+              </div>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept="application/json"
+                onChange={handleImport}
+                style={{ display: 'none' }}
+              />
+            </div>
+          </div>
+
+          {/* Simulation History Section */}
+          <div className="section">
+            <div className="section-header">
+              <h3>
+                <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M12 8v5l3 3"/>
+                  <circle cx="12" cy="12" r="9"/>
+                </svg>
+                Simulation History
+              </h3>
+              <button className="btn btn-secondary btn-sm" onClick={exportHistory}>
+                Download All
+              </button>
+            </div>
+            <div className="section-content">
+              {simulationHistory.length === 0 ? (
+                <div className="instruction-text">Run a simulation to start logging results</div>
+              ) : (
+                <div className="history-table">
+                  <div className="history-row history-header">
+                    <span>Network</span>
+                    <span>PoA</span>
+                    <span>WE</span>
+                    <span>SO</span>
+                    <span>Action</span>
+                  </div>
+                  {simulationHistory.map(entry => (
+                    <div key={entry.id} className="history-row">
+                      <span title={new Date(entry.createdAt).toLocaleString()}>{entry.name}</span>
+                      <span>{entry.results?.price_of_anarchy?.toFixed(3) ?? '--'}</span>
+                      <span>{entry.results?.wardrop_equilibrium?.total_system_cost?.toFixed(1) ?? '--'}</span>
+                      <span>{entry.results?.system_optimum?.total_system_cost?.toFixed(1) ?? '--'}</span>
+                      <button className="btn btn-danger btn-sm" onClick={() => setSimulationHistory(prev => prev.filter(item => item.id !== entry.id))}>Delete</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="btn-group">
+                <button className="btn btn-secondary btn-sm" onClick={exportSession}>Export Session</button>
+              </div>
+            </div>
+          </div>
+
           {/* Compute Button */}
           <button 
             className="btn btn-primary btn-block"
@@ -811,8 +1107,50 @@ function App() {
             onEdgeClick={handleEdgeClick}
             edgeResults={currentEdgeResults}
             showResults={!!results}
-            resultType={resultType}
           />
+
+          {/* Demand Panel */}
+          <div className="demand-panel demand-panel--bottom-right">
+            <div className="demand-panel-header">Demand Panel</div>
+            {odPairs.length === 0 ? (
+              <div className="demand-panel-empty">No OD pairs yet</div>
+            ) : (
+              <div className="demand-panel-list">
+                {odPairs.map(od => (
+                  <div key={od.id} className="demand-panel-item">
+                    <div className="demand-panel-row">
+                      <span className="demand-panel-od">{od.origin} → {od.destination}</span>
+                      <div className="demand-panel-actions">
+                        <button
+                          className="demand-panel-value"
+                          onClick={() => setDemandEditorId(prev => prev === od.id ? null : od.id)}
+                        >
+                          {od.demand}
+                        </button>
+                        <button className="btn btn-danger btn-sm" onClick={() => deleteOdPair(od.id)}>X</button>
+                      </div>
+                    </div>
+                    {demandEditorId === od.id && (
+                      <div className="demand-panel-editor">
+                        <input
+                          type="range"
+                          min="1"
+                          max="100"
+                          value={od.demand}
+                          onChange={(e) => updateOdPair(od.id, 'demand', e.target.value)}
+                        />
+                        <input
+                          type="number"
+                          value={od.demand}
+                          onChange={(e) => updateOdPair(od.id, 'demand', e.target.value)}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Results Panel */}
           {results && (
@@ -896,6 +1234,57 @@ function App() {
                         <span style={{ float: 'right', color: '#10b981' }}>Flow: {pf.flow}</span>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {routeLoadCharts.length > 0 && (
+                  <div className="chart-section">
+                    <h4>Route Load by OD Pair</h4>
+                    <div className="chart-grid">
+                      {routeLoadCharts.map(chart => (
+                        <div key={chart.odKey} className="chart-card">
+                          <div className="chart-title">{chart.odKey}</div>
+                          <div className="chart-wrapper">
+                            <Bar
+                              data={{
+                                labels: chart.labels,
+                                datasets: [
+                                  {
+                                    label: 'Flow',
+                                    data: chart.data,
+                                    backgroundColor: 'rgba(99, 102, 241, 0.6)',
+                                    borderColor: '#6366f1',
+                                    borderWidth: 1
+                                  }
+                                ]
+                              }}
+                              options={{
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                plugins: {
+                                  legend: {
+                                    display: false
+                                  },
+                                  tooltip: {
+                                    enabled: true
+                                  }
+                                },
+                                scales: {
+                                  x: {
+                                    ticks: { color: '#c4c4d4', font: { size: 10 } },
+                                    grid: { color: 'rgba(255,255,255,0.05)' }
+                                  },
+                                  y: {
+                                    ticks: { color: '#c4c4d4', font: { size: 10 } },
+                                    grid: { color: 'rgba(255,255,255,0.05)' }
+                                  }
+                                }
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
