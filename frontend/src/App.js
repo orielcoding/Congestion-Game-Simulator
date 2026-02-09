@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import axios from 'axios';
 
 // API Configuration
-const API_BASE_URL = 'http://localhost:8000';
+const API_BASE_URL = 'https://congestion-game-simulator.onrender.com/';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper Functions
