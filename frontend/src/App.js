@@ -13,7 +13,7 @@ import {
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend);
 
 // API Configuration
-const API_BASE_URL = 'http://localhost:8000'; //'https://congestion-game-simulator.onrender.com/';
+const API_BASE_URL =  'https://congestion-game-simulator.onrender.com/';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper Functions
